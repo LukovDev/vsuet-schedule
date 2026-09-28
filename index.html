@@ -54,6 +54,7 @@
             html {
                 -webkit-text-size-adjust: 100%;
                 touch-action: pan-x pan-y;  /* Без зума щипком и двойным тапом. */
+                overflow-x: clip;
             }
             body {
                 margin: 0;
@@ -61,7 +62,8 @@
                 color: var(--text);
                 font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
                 -webkit-font-smoothing: antialiased;
-                overflow-x: hidden;
+                overflow-x: hidden;  /* Для старых браузеров без clip. */
+                overflow-x: clip;    /* Уехавший при свайпе список обрезается, прокрутки вбок нет. */
                 -webkit-user-select: none;  /* Интерфейс пальцем не выделяется. */
                 user-select: none;
                 -webkit-touch-callout: none;
@@ -402,12 +404,7 @@
             }
             .sheet-close:active { transform: scale(.9); }
 
-            /* Колесо: доля синей половинки плавно меняется через --split */
-            @property --split {
-                syntax: '<percentage>';
-                inherits: false;
-                initial-value: 50%;
-            }
+            /* Колесо: доля синей половинки задаётся через --split (ставится сразу при открытии, без анимации) */
             .wheel-box {
                 --size: min(72vw, 300px, 40vh);
                 --size: min(72vw, 300px, 40dvh);
@@ -445,7 +442,6 @@
                 border-radius: 50%;
                 background: conic-gradient(var(--accent) 0 var(--split), var(--wheel-alt) var(--split) 100%);
                 box-shadow: 0 0 0 1px var(--line), inset 0 0 0 5px var(--surface);
-                transition: --split .6s var(--ease);
             }
 
             /* Риски по краю колеса: короткие на каждый 1%, длинные на каждые 10% */
@@ -477,7 +473,6 @@
                 line-height: 1.15;
                 white-space: nowrap;
                 transform: translate(-50%, -50%) rotate(var(--mid, 0deg)) translateY(calc(var(--size) * -0.28));
-                transition: transform .6s var(--ease), opacity .3s;
             }
             .wheel-label.tiny { opacity: 0; }
             .wheel-label b {
