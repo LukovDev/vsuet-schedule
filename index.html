@@ -7,7 +7,7 @@
         <meta name="theme-color" content="#f2f4f7" media="(prefers-color-scheme: light)">
         <meta name="theme-color" content="#0d1117" media="(prefers-color-scheme: dark)">
         <title>Расписание</title>
-        <link rel="icon" href="favicon.ico">
+        <link rel="icon" href="favicon.ico?v=1">
         <link rel="apple-touch-icon" href="favicon.ico">
         <style>
             :root {
@@ -99,7 +99,7 @@
                 min-height: 100dvh;
                 max-width: 560px;
                 margin: 0 auto;
-                padding: calc(16px + env(safe-area-inset-top, 0px)) 16px calc(24px + env(safe-area-inset-bottom, 0px));
+                padding: calc(24px + env(safe-area-inset-top, 0px)) 16px calc(24px + env(safe-area-inset-bottom, 0px));
             }
 
             /* шапка */
@@ -111,7 +111,39 @@
                 margin-bottom: 12px;
             }
             .head h1 { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
-            .head span { color: var(--muted); font-size: 13px; }
+            .head > span { color: var(--muted); font-size: 13px; }
+
+            /* Таймер в углу шапки: сверху главный отсчёт, снизу подсказка (перерыв посреди пары, следующая пара) */
+            .timer {
+                display: inline-grid;
+                grid-template-columns: auto auto;
+                align-items: baseline;
+                gap: 1px 8px;
+                padding: 6px 11px;
+                border-radius: 12px;
+                background: var(--accent-soft);
+                color: var(--accent-text);
+                font-size: 12px;
+                font-weight: 600;
+                white-space: nowrap;
+            }
+            .timer[hidden] { display: none; }
+            .timer b {
+                font-size: 14px;
+                font-weight: 700;
+                font-variant-numeric: tabular-nums;
+                text-align: right;
+            }
+            .timer .sub {
+                font-size: 11.5px;
+                font-weight: 600;
+                opacity: .75;
+            }
+            .timer.break,
+            .timer.before {
+                background: var(--tag);
+                color: var(--text);
+            }
 
             /* плашка, которая переезжает под выбранную кнопку */
             .thumb {
@@ -556,6 +588,12 @@
             <header class="head">
                 <h1 id="title">Расписание</h1>
                 <span id="subtitle"></span>
+                <div class="timer" id="timer" role="timer" hidden>
+                    <span></span>
+                    <b></b>
+                    <span class="sub"></span>
+                    <b class="sub"></b>
+                </div>
             </header>
             <div class="controls">
                 <div class="seg" id="group" role="group" aria-label="Группа"></div>
@@ -834,6 +872,7 @@
                     );
                 }
                 if (anim) glideFoot(footTop, anim);
+                updateTimer();  // Сменили группу или подгруппу - таймер считает по ним.
             }
 
             // Кнопка рулетки не прыгает при смене высоты списка, а плавно едет со старого места на новое:
@@ -996,9 +1035,20 @@
                 label.style.setProperty('--mid', mid + 'deg');
             }
 
-            // Новые случайные шансы при открытии: от 1/99 до 99/1:
+            // Шанс дня от 1 до 99: считается из сегодняшней даты, весь день один и тот же, меняется в полночь:
+            function dailySplit(){
+                const d = new Date();
+                let h = d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate();  // Например 20261002.
+                // Перемешиваем число, чтобы у соседних дней шансы не шли подряд (как 41, 42, 43):
+                h = Math.imul(h ^ (h >>> 16), 0x45d9f3b);
+                h = Math.imul(h ^ (h >>> 16), 0x45d9f3b);
+                h ^= h >>> 16;
+                return 1 + (h >>> 0) % 99;
+            }
+
+            // Выставить шансы дня на колесо: от 1/99 до 99/1:
             function shuffleOdds(){
-                const go = rand(1, 99), skip = 100 - go;
+                const go = dailySplit(), skip = 100 - go;
                 roulette.split = go;
                 wheelEl.style.setProperty('--split', go + '%');
                 setLabelAngle(labelGoEl, go * 1.8);
@@ -1154,6 +1204,78 @@
             grabEl.addEventListener('touchend', endSheetDrag);
             grabEl.addEventListener('touchcancel', endSheetDrag);
 
+            /* ---------- таймер пары / перемены ---------- */
+
+            const timerEl = document.getElementById('timer');
+            const subtitleEl = document.getElementById('subtitle');
+
+            // Секунды в формат ЧЧ:ММ:СС:
+            function hms(sec){
+                const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
+                return [h, m, s].map(n => String(n).padStart(2, '0')).join(':');
+            }
+
+            // Что сейчас по сегодняшним парам выбранной группы и подгруппы.
+            // Сверху главный отсчёт (до пары / до конца пары / сколько осталось перемены),
+            // снизу подсказка: перерыв посреди пары (45 + 5 + 45) или когда следующая пара:
+            function timerState(){
+                const now = new Date();
+                const day = (now.getDay() + 6) % 7;  // Пн = 0 … Вс = 6.
+                if (day >= DAYS.length) return null;
+                const sec = now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
+                const pause = 5 * 60;  // Перерыв посреди пары.
+                const slots = slotsFor(state.group, day)
+                    .map(s => ({ pair: s.pair, at: s.time.start, start: toMin(s.time.start) * 60, end: toMin(s.time.end) * 60 }))
+                    .filter(s => s.start < s.end);  // Пары без известного времени пропускаем.
+
+                for (let i = 0; i < slots.length; i++){
+                    const s = slots[i], next = slots[i + 1];
+                    const nextPair = next ? { label: `${next.pair} пара в`, time: next.at } : null;
+
+                    // Пары ещё не начались или идёт перемена между парами:
+                    if (sec < s.start) return {
+                        kind: i === 0 ? 'before' : 'break',
+                        label: i === 0 ? 'пара через' : 'перемена ещё',
+                        left: s.start - sec,
+                        sub: { label: `${s.pair} пара в`, time: s.at }
+                    };
+
+                    // Идёт пара: снизу перерыв посреди пары, а во второй половине - следующая пара:
+                    if (sec < s.end){
+                        const half = (s.end - s.start - pause) / 2;
+                        const pauseStart = s.start + half, pauseEnd = pauseStart + pause;
+                        let sub = nextPair;
+                        if (half > 0 && sec < pauseStart) sub = { label: 'перерыв через', time: hms(pauseStart - sec) };
+                        else if (half > 0 && sec < pauseEnd) sub = { label: 'перерыв ещё', time: hms(pauseEnd - sec) };
+                        return { kind: 'pair', label: next ? 'конец пары через' : 'конец пар через', left: s.end - sec, sub };
+                    }
+                }
+                return null;  // Пары закончились или сегодня их нет.
+            }
+
+            // Обновить таймер; если показывать нечего - вместо него подпись из schedule.js:
+            function updateTimer(){
+                const t = timerState();
+                timerEl.hidden = !t;
+                subtitleEl.hidden = !!t;
+                if (!t) return;
+                const [label, time, subLabel, subTime] = timerEl.children;
+                timerEl.className = 'timer ' + t.kind;
+                label.textContent = t.label;
+                time.textContent = hms(t.left);
+                subLabel.hidden = subTime.hidden = !t.sub;
+                if (t.sub){
+                    subLabel.textContent = t.sub.label;
+                    subTime.textContent = t.sub.time;
+                }
+            }
+
+            // Тикаем ровно на смене секунды, чтобы цифры не «плавали»:
+            function tickTimer(){
+                updateTimer();
+                setTimeout(tickTimer, 1000 - Date.now() % 1000 + 5);
+            }
+
             /* ---------- без зума, как в приложении ---------- */
 
             // iOS Safari игнорирует user-scalable=no, поэтому гасим жесты щипка вручную:
@@ -1177,6 +1299,7 @@
             document.title = (S.title || 'Расписание') + ' · ' + GROUPS.join(' / ');
 
             render();
+            tickTimer();
 
             // офлайн-режим (работает только на http/https, не при открытии файла с диска)
             if ('serviceWorker' in navigator && location.protocol.startsWith('http')){
