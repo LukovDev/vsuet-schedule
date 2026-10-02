@@ -126,24 +126,56 @@
                 font-size: 12px;
                 font-weight: 600;
                 white-space: nowrap;
+                overflow: hidden;  /* Пока плашка меняет размер, текст не вылезает. */
+                transform-origin: 100% 0;
+                transition: background-color .35s var(--ease), color .35s var(--ease);
             }
             .timer[hidden] { display: none; }
-            .timer b {
-                font-size: 14px;
+
+            /* Главная строка жирнее и крупнее подстрочья */
+            .timer > span:not(.sub) {
+                font-size: 13px;
                 font-weight: 700;
+            }
+            .timer b {
+                font-size: 15px;
+                font-weight: 800;
                 font-variant-numeric: tabular-nums;
                 text-align: right;
+                line-height: 1.2;
+            }
+
+            /* Цифры-барабаны: каждая цифра в своём окошке, при смене прокручивается */
+            .dg {
+                position: relative;
+                display: inline-block;
+                height: 1.2em;
+                overflow: hidden;
+                vertical-align: top;
+            }
+            .dg > i {
+                display: block;
+                font-style: normal;
+            }
+            .dg > i.out {
+                position: absolute;
+                inset: 0;
             }
             .timer .sub {
                 font-size: 11.5px;
-                font-weight: 600;
+                font-weight: 500;
                 opacity: .75;
             }
+            /* Пара - синяя плашка; перерыв, перемена, «до пар» и «пара через N дней» - серая, отдых сразу видно по цвету */
+            .timer.pause,
             .timer.break,
-            .timer.before {
+            .timer.before,
+            .timer.later {
                 background: var(--tag);
                 color: var(--text);
             }
+            .timer.pause > b:not(.sub),
+            .timer.break > b:not(.sub) { color: var(--accent-text); }
 
             /* плашка, которая переезжает под выбранную кнопку */
             .thumb {
@@ -1221,7 +1253,7 @@
             function timerState(){
                 const now = new Date();
                 const day = (now.getDay() + 6) % 7;  // Пн = 0 … Вс = 6.
-                if (day >= DAYS.length) return null;
+                if (day >= DAYS.length) return nextDayState(day);
                 const sec = now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
                 const pause = 5 * 60;  // Перерыв посреди пары.
                 const slots = slotsFor(state.group, day)
@@ -1244,30 +1276,174 @@
                     if (sec < s.end){
                         const half = (s.end - s.start - pause) / 2;
                         const pauseStart = s.start + half, pauseEnd = pauseStart + pause;
-                        let sub = nextPair;
-                        if (half > 0 && sec < pauseStart) sub = { label: 'перерыв через', time: hms(pauseStart - sec) };
-                        else if (half > 0 && sec < pauseEnd) sub = { label: 'перерыв ещё', time: hms(pauseEnd - sec) };
-                        return { kind: 'pair', label: next ? 'конец пары через' : 'конец пар через', left: s.end - sec, sub };
+                        const endLabel = next ? 'конец пары через' : 'конец пар через';
+
+                        // Сам перерыв посреди пары - главной строкой, чтобы было сразу видно:
+                        if (half > 0 && sec >= pauseStart && sec < pauseEnd) return {
+                            kind: 'pause',
+                            label: 'перерыв ещё',
+                            left: pauseEnd - sec,
+                            sub: { label: endLabel, time: hms(s.end - sec) }
+                        };
+                        const sub = half > 0 && sec < pauseStart ? { label: 'перерыв через', time: hms(pauseStart - sec) } : nextPair;
+                        return { kind: 'pair', label: endLabel, left: s.end - sec, sub };
                     }
                 }
-                return null;  // Пары закончились или сегодня их нет.
+                return nextDayState(day);  // Пары закончились или сегодня их нет.
             }
+
+            // 1 день, 2 дня, 5 дней:
+            function daysWord(n){
+                const a = n % 10, b = n % 100;
+                const w = a === 1 && b !== 11 ? 'день' : a >= 2 && a <= 4 && (b < 12 || b > 14) ? 'дня' : 'дней';
+                return n + ' ' + w;
+            }
+
+            // Сегодня пар больше нет - ищем ближайший день с парами (расписание повторяется каждую неделю):
+            function nextDayState(today){
+                for (let k = 1; k <= 7; k++){
+                    const d = (today + k) % 7;
+                    if (d >= DAYS.length) continue;  // Воскресенье.
+                    const first = slotsFor(state.group, d)[0];
+                    if (!first) continue;
+                    if (k === 1) return {
+                        kind: 'later',
+                        label: 'пара завтра в',
+                        text: first.time.start,
+                        sub: { label: `${SHORT[d]}, ${first.pair} пара`, time: '' }
+                    };
+                    return {
+                        kind: 'later',
+                        label: 'пара через',
+                        text: daysWord(k),
+                        sub: { label: `${SHORT[d]}, ${first.pair} пара в`, time: first.time.start }
+                    };
+                }
+                return null;  // У группы (подгруппы) вообще нет пар.
+            }
+
+            const EASE = 'cubic-bezier(.25, .8, .25, 1)';
+            let timerVisible = false;  // Показан ли таймер (или уже уезжает).
+            let timerKey = '';         // Текущее состояние: при смене - анимация.
+            let timerAnim = null;      // Анимация появления/исчезновения.
 
             // Обновить таймер; если показывать нечего - вместо него подпись из schedule.js:
             function updateTimer(){
                 const t = timerState();
-                timerEl.hidden = !t;
-                subtitleEl.hidden = !!t;
-                if (!t) return;
+                if (!t){
+                    if (timerVisible) hideTimer();
+                    return;
+                }
                 const [label, time, subLabel, subTime] = timerEl.children;
+                const key = t.kind + '|' + t.label + '|' + (t.sub ? t.sub.label : '-');
+                const oldW = timerEl.offsetWidth, oldH = timerEl.offsetHeight;
+
                 timerEl.className = 'timer ' + t.kind;
                 label.textContent = t.label;
-                time.textContent = hms(t.left);
+                setDrum(time, t.text || hms(t.left));  // «2 дня» / «11:50» или отсчёт ЧЧ:ММ:СС.
                 subLabel.hidden = subTime.hidden = !t.sub;
                 if (t.sub){
                     subLabel.textContent = t.sub.label;
-                    subTime.textContent = t.sub.time;
+                    setDrum(subTime, t.sub.time);
                 }
+
+                if (!timerVisible) showTimer();
+                else if (key !== timerKey) morphTimer(oldW, oldH, t.sub ? [label, time, subLabel, subTime] : [label, time]);
+                timerKey = key;
+            }
+
+            // Вывести время «барабаном»: если поменялись только цифры - прокручиваем их, иначе просто перерисовываем:
+            function setDrum(elem, text){
+                const old = elem.dataset.text || '';
+                if (old === text) return;
+                elem.dataset.text = text;
+                const isDigit = c => c >= '0' && c <= '9';
+                const sameShape = old.length === text.length
+                    && [...text].every((c, i) => isDigit(c) ? isDigit(old[i]) : c === old[i]);
+                if (!sameShape || reduceMotion.matches){
+                    // Один узел на символ, чтобы потом цифры находились по номеру:
+                    elem.replaceChildren(...[...text].map(c => isDigit(c) ? drumCell(c) : document.createTextNode(c)));
+                    return;
+                }
+                [...text].forEach((c, i) => {
+                    if (c !== old[i]) rollCell(elem.childNodes[i], c);
+                });
+            }
+
+            // Окошко для одной цифры:
+            function drumCell(c){
+                const cell = el('span', 'dg');
+                cell.append(el('i', null, c));
+                return cell;
+            }
+
+            // Прокрутить цифру: старая уезжает вниз, новая приезжает сверху (как барабан при обратном отсчёте):
+            function rollCell(cell, c){
+                const oldI = cell.lastElementChild, newI = el('i', null, c);
+                for (const i of [...cell.children].slice(0, -1)) i.remove();  // Хвосты от прошлых быстрых смен.
+                oldI.classList.add('out');
+                cell.append(newI);
+                newI.animate(
+                    [{ opacity: 0, transform: 'translateY(-100%)' }, { opacity: 1, transform: 'none' }],
+                    { duration: 380, easing: EASE }
+                );
+                oldI.animate(
+                    [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateY(100%)' }],
+                    { duration: 380, easing: EASE, fill: 'forwards' }
+                ).onfinish = () => oldI.remove();
+            }
+
+            // Появление таймера: подпись прячется, плашка выезжает сверху:
+            function showTimer(){
+                timerVisible = true;
+                if (timerAnim) timerAnim.cancel();
+                subtitleEl.hidden = true;
+                timerEl.hidden = false;
+                if (reduceMotion.matches) return;
+                timerAnim = timerEl.animate(
+                    [{ opacity: 0, transform: 'translateY(-6px) scale(.9)' }, { opacity: 1, transform: 'none' }],
+                    { duration: 320, easing: EASE }
+                );
+            }
+
+            // Исчезновение таймера: плашка уезжает вверх, потом плавно возвращается подпись:
+            function hideTimer(){
+                timerVisible = false;
+                timerKey = '';
+                if (timerAnim) timerAnim.cancel();
+                const done = () => {
+                    timerEl.hidden = true;
+                    subtitleEl.hidden = false;
+                    if (!reduceMotion.matches) subtitleEl.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 250 });
+                };
+                if (reduceMotion.matches) return done();
+                timerAnim = timerEl.animate(
+                    [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateY(-6px) scale(.9)' }],
+                    { duration: 220, easing: 'ease-in', fill: 'forwards' }
+                );
+                timerAnim.onfinish = () => {
+                    timerAnim.cancel();
+                    done();
+                };
+            }
+
+            // Смена состояния: плашка плавно меняет размер, а надписи въезжают снизу по очереди:
+            function morphTimer(oldW, oldH, changed){
+                if (reduceMotion.matches) return;
+                const w = timerEl.offsetWidth, h = timerEl.offsetHeight;
+                if (w !== oldW || h !== oldH){
+                    timerEl.animate(
+                        [{ width: oldW + 'px', height: oldH + 'px' }, { width: w + 'px', height: h + 'px' }],
+                        { duration: 350, easing: EASE }
+                    );
+                }
+                changed.forEach((elem, i) => {
+                    const opacity = getComputedStyle(elem).opacity;  // У нижней строки своя прозрачность.
+                    elem.animate(
+                        [{ opacity: 0, transform: 'translateY(6px)' }, { opacity, transform: 'none' }],
+                        { duration: 300, delay: (i >> 1) * 60, easing: EASE, fill: 'backwards' }
+                    );
+                });
             }
 
             // Тикаем ровно на смене секунды, чтобы цифры не «плавали»:
